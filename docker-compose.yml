@@ -14,5 +14,38 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
 
+  ollama:
+    image: ollama/ollama
+    container_name: abbei_ollama
+    ports:
+      - "11435:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    restart: always
+
+  backend:
+    build: ./backend
+    container_name: abbei_backend
+    restart: always
+    env_file:
+      - .env
+    ports:
+      - "8000:8000"
+    depends_on:
+      - postgres
+      - ollama
+    volumes:
+      - ./backend:/app
+
+  frontend:
+    build: ./frontend
+    container_name: abbei_frontend
+    restart: always
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+
 volumes:
   postgres_data:
+  ollama_data:
