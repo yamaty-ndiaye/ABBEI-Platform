@@ -20,14 +20,19 @@ DATABASE_URL = (
 # Ollama / Mistral
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11435")
 MISTRAL_MODEL = "mistral"
+EMBEDDING_MODEL = "nomic-embed-text"
 
 # Dropbox
+DROPBOX_TOKEN = os.getenv("DROPBOX_TOKEN")
+DROPBOX_CHANTIERS_PATH = "/ABBEI/ChantiersABBEI"
+DROPBOX_COMPTA_PATH = "/ABBEI/COMPTA"
+DROPBOX_RH_PATH = "/ABBEI/RH Public"
 CHANTIERS_PATH = os.getenv("CHANTIERS_PATH")
 RH_PATH = os.getenv("RH_PATH")
 
 # RAG
-CHUNK_SIZE = 500
-CHUNK_OVERLAP = 50
+CHUNK_SIZE = 1000
+CHUNK_OVERLAP = 100
 TOP_K_RESULTS = 5
 
 # System prompt assistant
