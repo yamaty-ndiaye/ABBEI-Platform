@@ -9,6 +9,7 @@
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException
 from fastapi.responses import JSONResponse
 from app.agents.invoice_agent import charger_tarif, traiter_facture
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Request
 
 router = APIRouter()
 
@@ -135,3 +136,21 @@ async def liste_factures():
         }
     finally:
         db.close()
+# ── 5. Export Excel ──────────────────────────────────────────
+@router.post("/factures/export")
+async def export_excel(request: Request):
+    """Génère et retourne un fichier Excel des anomalies."""
+    from fastapi import Request
+    from fastapi.responses import Response
+    from app.agents.export_agent import generer_export_excel
+    from datetime import date
+
+    resultats = await request.json()
+    fichier = generer_export_excel(resultats)
+    nom = f"Anomalies_Factures_{date.today().strftime('%Y%m%d')}.xlsx"
+
+    return Response(
+        content=fichier,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename={nom}"}
+    )
