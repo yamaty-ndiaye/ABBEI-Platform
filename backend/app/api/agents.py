@@ -6,10 +6,11 @@
 #              fournisseurs (upload tarif + analyse PDF)
 # ============================================================
 
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException
-from fastapi.responses import JSONResponse
-from app.agents.invoice_agent import charger_tarif, traiter_facture
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Request
+from fastapi.responses import Response, JSONResponse
+from app.agents.invoice_agent import charger_tarif, traiter_facture
+from app.agents.export_agent import generer_export_excel, generer_reclamation_excel
+from datetime import date
 
 router = APIRouter()
 
@@ -29,28 +30,18 @@ async def upload_tarif(
     fournisseur: str = Form(...),
     annee: int = Form(...)
 ):
-    """
-    Charge un fichier Excel tarif fournisseur.
-    Le tarif est sauvegardé en base ET gardé en mémoire
-    pour les analyses de la session.
-    """
     if not fichier.filename.endswith((".xlsx", ".xls")):
-        raise HTTPException(
-            status_code=400,
-            detail="Le fichier doit être un Excel (.xlsx ou .xls)"
-        )
-
+        raise HTTPException(status_code=400,
+                            detail="Le fichier doit être un Excel (.xlsx ou .xls)")
     contenu = await fichier.read()
-
     try:
         tarif = charger_tarif(contenu, fournisseur, annee)
         tarifs_en_memoire[fournisseur] = tarif
-
         return {
-            "message": f"Tarif {fournisseur} {annee} chargé avec succès",
-            "fournisseur": fournisseur,
-            "annee": annee,
-            "nb_references": len(tarif)
+            "message":        f"Tarif {fournisseur} {annee} chargé avec succès",
+            "fournisseur":    fournisseur,
+            "annee":          annee,
+            "nb_references":  len(tarif)
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erreur lecture tarif : {str(e)}")
@@ -62,25 +53,15 @@ async def analyser_facture(
     fichier: UploadFile = File(...),
     fournisseur: str = Form(...)
 ):
-    """
-    Analyse un PDF facture fournisseur.
-    Compare au tarif chargé en mémoire et détecte les anomalies.
-    """
     if not fichier.filename.endswith(".pdf"):
-        raise HTTPException(
-            status_code=400,
-            detail="Le fichier doit être un PDF"
-        )
+        raise HTTPException(status_code=400, detail="Le fichier doit être un PDF")
 
     if fournisseur not in tarifs_en_memoire:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Tarif '{fournisseur}' non chargé. Uploadez d'abord le fichier Excel tarif."
-        )
+        raise HTTPException(status_code=400,
+                            detail=f"Tarif '{fournisseur}' non chargé. Uploadez d'abord le fichier Excel tarif.")
 
     contenu = await fichier.read()
-    tarif = tarifs_en_memoire[fournisseur]
-
+    tarif   = tarifs_en_memoire[fournisseur]
     try:
         resultat = traiter_facture(contenu, tarif, fichier.filename)
         return resultat
@@ -91,7 +72,6 @@ async def analyser_facture(
 # ── 3. Liste des tarifs chargés ──────────────────────────────
 @router.get("/tarifs")
 async def liste_tarifs():
-    """Retourne les tarifs actuellement chargés en mémoire."""
     return {
         "tarifs": [
             {"fournisseur": f, "nb_references": len(t)}
@@ -100,10 +80,9 @@ async def liste_tarifs():
     }
 
 
-# ── 4. Historique factures analysées ────────────────────────
+# ── 4. Historique factures analysées ─────────────────────────
 @router.get("/factures")
 async def liste_factures():
-    """Retourne toutes les factures analysées depuis la base."""
     from sqlalchemy import text
     from app.core.database import SessionLocal
 
@@ -136,21 +115,32 @@ async def liste_factures():
         }
     finally:
         db.close()
-# ── 5. Export Excel ──────────────────────────────────────────
+
+
+# ── 5. Export Excel ───────────────────────────────────────────
 @router.post("/factures/export")
 async def export_excel(request: Request):
-    """Génère et retourne un fichier Excel des anomalies."""
-    from fastapi import Request
-    from fastapi.responses import Response
-    from app.agents.export_agent import generer_export_excel
-    from datetime import date
-
     resultats = await request.json()
-    fichier = generer_export_excel(resultats)
-    nom = f"Anomalies_Factures_{date.today().strftime('%Y%m%d')}.xlsx"
+    fichier   = generer_export_excel(resultats)
+    nom       = f"Anomalies_Factures_{date.today().strftime('%Y%m%d')}.xlsx"
 
     return Response(
         content=fichier,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": f"attachment; filename={nom}"}
+        headers={"Content-Disposition": f'attachment; filename="{nom}"'}
+    )
+
+
+# ── 6. Réclamation avoir ──────────────────────────────────────
+@router.post("/facture/reclamation")
+async def generer_reclamation(request: Request):
+    data    = await request.json()
+    facture = data.get("facture", {})
+    fichier = generer_reclamation_excel(facture, data.get("anomalies", []))
+    nom     = f"Reclamation_{facture.get('numero_facture', 'facture')}_{date.today().strftime('%Y%m%d')}.xlsx"
+
+    return Response(
+        content=fichier,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{nom}"'}
     )

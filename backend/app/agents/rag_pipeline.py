@@ -7,9 +7,9 @@ from docx import Document as DocxDocument
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_chroma import Chroma
 from langchain_ollama import OllamaEmbeddings
-from langchain_core.prompts import PromptTemplate
 from langchain_core.documents import Document
 from sentence_transformers import CrossEncoder
+from rank_bm25 import BM25Okapi
 import anthropic
 from app.agents.dropbox_connector import (
     get_client, lister_fichiers_dropbox, telecharger_fichier, generer_lien
@@ -27,10 +27,11 @@ from app.core.config import (
 # ============================================
 
 def extraire_texte(tmp_path: str, extension: str) -> str:
-    """Extrait le texte d'un fichier selon son extension"""
     try:
         if extension == '.pdf':
             texte = ""
+
+            # Essai 1 : pdfplumber
             try:
                 with pdfplumber.open(tmp_path) as pdf:
                     for page in pdf.pages:
@@ -39,6 +40,20 @@ def extraire_texte(tmp_path: str, extension: str) -> str:
                             texte += t + "\n"
             except:
                 pass
+
+            # Essai 2 : OCR sur toutes les pages
+            try:
+                from pdf2image import convert_from_path
+                import pytesseract
+                pages_images = convert_from_path(tmp_path, dpi=150)
+                for page_img in pages_images:
+                    ocr_texte = pytesseract.image_to_string(page_img, lang='fra')
+                    if ocr_texte.strip():
+                        texte += ocr_texte + "\n"
+            except:
+                pass
+
+            # Fallback PyMuPDF
             if not texte.strip():
                 try:
                     doc = fitz.open(tmp_path)
@@ -46,6 +61,7 @@ def extraire_texte(tmp_path: str, extension: str) -> str:
                         texte += page.get_text()
                 except:
                     pass
+
             return texte
 
         elif extension in ['.docx', '.doc']:
@@ -101,7 +117,6 @@ def extraire_texte(tmp_path: str, extension: str) -> str:
 # ============================================
 
 def detecter_type(nom: str) -> str:
-    """Détecte le type de document selon son nom"""
     nom_lower = nom.lower()
     if any(x in nom_lower for x in ['facture', 'f150206', 'f240', 'f260']):
         return "facture"
@@ -114,7 +129,6 @@ def detecter_type(nom: str) -> str:
 
 
 def detecter_filtre(question: str) -> dict:
-    """Détecte si on doit filtrer par type de document"""
     q = question.lower()
     if any(x in q for x in ['facture', 'montant', 'ttc', 'ht', 'tva', 'paiement']):
         return {"type": "facture"}
@@ -124,26 +138,101 @@ def detecter_filtre(question: str) -> dict:
 
 
 # ============================================
+# Chunking intelligent par type de document
+# ============================================
+
+def chunker_hybrid(doc: Document) -> list:
+    if len(doc.page_content) < 2000:
+        return [doc]
+    splitter = RecursiveCharacterTextSplitter(
+        separators=["\n\n", "\n", " "],
+        chunk_size=CHUNK_SIZE,
+        chunk_overlap=CHUNK_OVERLAP
+    )
+    return splitter.split_documents([doc])
+
+
+def chunker_paragraphe(doc: Document) -> list:
+    splitter = RecursiveCharacterTextSplitter(
+        separators=["\n\n", "\n"],
+        chunk_size=1500,
+        chunk_overlap=150
+    )
+    return splitter.split_documents([doc])
+
+
+def chunker_simple(doc: Document) -> list:
+    if len(doc.page_content) < 2000:
+        return [doc]
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=500,
+        chunk_overlap=50
+    )
+    return splitter.split_documents([doc])
+
+
+def chunker_par_type(doc: Document) -> list:
+    type_doc = doc.metadata.get("type", "autre")
+    if type_doc == "facture":
+        return chunker_hybrid(doc)
+    elif type_doc == "administratif":
+        return chunker_paragraphe(doc)
+    elif type_doc == "bon_commande":
+        return chunker_simple(doc)
+    else:
+        return chunker_simple(doc)
+
+
+# ============================================
+# Recherche hybride BM25 + Vector
+# ============================================
+
+def recherche_bm25(chunks_tous: list, question: str, k: int = 20) -> list:
+    corpus = [chunk.page_content.lower().split() for chunk in chunks_tous]
+    bm25 = BM25Okapi(corpus)
+    tokens_question = question.lower().split()
+    scores = bm25.get_scores(tokens_question)
+    indices_tries = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:k]
+    return [chunks_tous[i] for i in indices_tries]
+
+
+def recherche_hybride(vectorstore, question: str, k: int = 20) -> list:
+    chunks_vector = vectorstore.similarity_search(question, k=k)
+    chunks_bm25 = recherche_bm25(chunks_vector, question, k=k)
+
+    vus = set()
+    chunks_fusionnes = []
+    for chunk_v, chunk_b in zip(chunks_vector, chunks_bm25):
+        for chunk in [chunk_v, chunk_b]:
+            nom = chunk.metadata.get("nom", "")
+            if nom not in vus:
+                chunks_fusionnes.append(chunk)
+                vus.add(nom)
+
+    return chunks_fusionnes
+
+
+# ============================================
 # Indexation
 # ============================================
 
-def indexer_documents(chemin_dropbox: str = None, reset: bool = False):
-    """Indexe les documents depuis Dropbox dans ChromaDB"""
+def indexer_documents(fichiers_liste: list = None, chemin_dropbox: str = None, reset: bool = False):
     chemin = chemin_dropbox or DROPBOX_CHANTIERS_PATH
 
     if reset and os.path.exists(CHROMA_PATH):
         shutil.rmtree(CHROMA_PATH)
         print("🗑️ ChromaDB réinitialisée")
 
-    print(f"🔍 Indexation depuis Dropbox : {chemin}")
-
     dbx = get_client()
-    fichiers = lister_fichiers_dropbox(dbx, chemin)
-    print(f"✅ {len(fichiers)} fichiers trouvés")
 
-    if not fichiers:
-        print("❌ Aucun fichier trouvé")
-        return None
+    # Utiliser la liste fournie ou lister depuis Dropbox
+    if fichiers_liste:
+        fichiers = fichiers_liste
+    else:
+        print(f"🔍 Indexation depuis Dropbox : {chemin}")
+        fichiers = lister_fichiers_dropbox(dbx, chemin)
+
+    print(f"✅ {len(fichiers)} fichiers à indexer")
 
     print("📄 Extraction du texte...")
     documents = []
@@ -175,7 +264,7 @@ def indexer_documents(chemin_dropbox: str = None, reset: bool = False):
             if tmp_path and os.path.exists(tmp_path):
                 os.unlink(tmp_path)
 
-        if i % 20 == 0:
+        if i % 5 == 0:
             print(f"  → {i}/{len(fichiers)} traités ({len(documents)} lisibles)...")
 
     print(f"✅ {len(documents)} documents extraits ({erreurs} erreurs)")
@@ -184,18 +273,10 @@ def indexer_documents(chemin_dropbox: str = None, reset: bool = False):
         print("❌ Aucun document lisible")
         return None
 
-    print("✂️  Découpage en chunks (adaptatif)...")
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=CHUNK_SIZE,
-        chunk_overlap=CHUNK_OVERLAP
-    )
-
+    print("✂️  Découpage en chunks...")
     chunks = []
     for doc in documents:
-        if len(doc.page_content) < 2000:
-            chunks.append(doc)
-        else:
-            chunks.extend(splitter.split_documents([doc]))
+        chunks.extend(chunker_par_type(doc))
 
     print(f"✅ {len(chunks)} chunks créés")
 
@@ -215,7 +296,6 @@ def indexer_documents(chemin_dropbox: str = None, reset: bool = False):
 # ============================================
 
 def charger_vectorstore():
-    """Charge le vectorstore existant"""
     embeddings = OllamaEmbeddings(model=EMBEDDING_MODEL, base_url=OLLAMA_HOST)
     return Chroma(persist_directory=CHROMA_PATH, embedding_function=embeddings)
 
@@ -238,17 +318,15 @@ def get_reranker():
 # ============================================
 
 def repondre(question: str) -> dict:
-    """Répond à une question via RAG avec reranking et Claude"""
     vectorstore = charger_vectorstore()
 
-    # 1. Détecter le filtre selon le type de question
     filtre = detecter_filtre(question)
     if filtre:
-        chunks = vectorstore.similarity_search(question, k=20, filter=filtre)
+        chunks = vectorstore.similarity_search(question, k=50, filter=filtre)
         if not chunks:
-            chunks = vectorstore.similarity_search(question, k=50)
+            chunks = recherche_hybride(vectorstore, question, k=50)
     else:
-        chunks = vectorstore.similarity_search(question, k=50)
+        chunks = recherche_hybride(vectorstore, question, k=50)
 
     if not chunks:
         return {
@@ -257,7 +335,6 @@ def repondre(question: str) -> dict:
             "sources": []
         }
 
-    # 2. Dédupliquer — garder le meilleur chunk par document
     chunks_dedupliques = []
     sources_vues = set()
     for chunk in chunks:
@@ -266,17 +343,14 @@ def repondre(question: str) -> dict:
             chunks_dedupliques.append(chunk)
             sources_vues.add(nom)
 
-    # 3. Reranking sur les chunks dédupliqués
     reranker = get_reranker()
     scores = reranker.predict(
         [(question, chunk.page_content) for chunk in chunks_dedupliques]
     )
 
-    # 4. Garder les 3 meilleurs
     chunks_tries = [chunk for _, chunk in
                     sorted(zip(scores, chunks_dedupliques), key=lambda x: x[0], reverse=True)][:3]
 
-    # 5. Construire le prompt et appeler Claude
     contexte = "\n\n".join([c.page_content for c in chunks_tries])
 
     prompt_text = f"""{SYSTEM_PROMPT}
@@ -296,7 +370,6 @@ Réponse :"""
     )
     reponse = message.content[0].text
 
-    # 6. Générer les liens Dropbox pour les sources
     dbx = get_client()
     sources = []
     vus = set()
@@ -320,8 +393,38 @@ Réponse :"""
     }
 
 
+# ============================================
+# Test sur 20 fichiers
+# ============================================
+
 if __name__ == "__main__":
-    indexer_documents(
-        chemin_dropbox="/abbei/ChantiersABBEI/HABITAT 76/Y-PE010Y-H76-MarchéEntretien",
-        reset=True
+    dbx = get_client()
+    tous_fichiers = lister_fichiers_dropbox(
+        dbx,
+        "/abbei/ChantiersABBEI/HABITAT 76/Y-PE010Y-H76-MarchéEntretien"
     )
+
+    # Sélectionner 30 fichiers représentatifs
+    factures = [f for f in tous_fichiers if any(x in f['nom'].lower() for x in ['f150206', 'f240', 'f260', 'facture'])]
+    bons_commande = [f for f in tous_fichiers if any(x in f['nom'].lower() for x in [' bt', ' bc', 'otms', 'otsol', 'otpeint', 'otdgs'])]
+    administratifs = [f for f in tous_fichiers if any(x in f['nom'].lower() for x in ['o02', 'o03', 'ccap', 'cctp', 'marche'])]
+    autres = [f for f in tous_fichiers if f not in factures + bons_commande + administratifs]
+
+    # Prendre un mix représentatif
+    fichiers_test = (
+        factures[:5] +        # 5 factures
+        bons_commande[:10] +  # 10 bons de commande
+        administratifs[:5] +  # 5 administratifs
+        autres[:10]           # 10 autres
+    )[:30]
+
+    print(f"📋 {len(fichiers_test)} fichiers sélectionnés :")
+    print(f"  Factures      : {len([f for f in fichiers_test if detecter_type(f['nom']) == 'facture'])}")
+    print(f"  Bons commande : {len([f for f in fichiers_test if detecter_type(f['nom']) == 'bon_commande'])}")
+    print(f"  Administratifs: {len([f for f in fichiers_test if detecter_type(f['nom']) == 'administratif'])}")
+    print(f"  Autres        : {len([f for f in fichiers_test if detecter_type(f['nom']) == 'autre'])}")
+
+    if os.path.exists(CHROMA_PATH):
+        shutil.rmtree(CHROMA_PATH)
+
+    indexer_documents(fichiers_liste=fichiers_test, reset=False)
