@@ -15,6 +15,11 @@ from openpyxl.utils import get_column_letter
 from io import BytesIO
 from datetime import date
 from collections import defaultdict
+from openpyxl.drawing.image import Image as XLImage
+import os
+
+ASSETS_DIR = os.path.join(os.path.dirname(__file__), "..", "assets")
+LOGO_PATH  = os.path.join(ASSETS_DIR, "logo_abbei.jpg")
 
 # ── Couleurs ─────────────────────────────────────────────────
 BLEU_FONCE   = "1E3A5F"
@@ -350,12 +355,22 @@ def generer_reclamation_excel(facture: dict, anomalies: list) -> bytes:
     ws = wb.active
     ws.title = "Réclamation"
 
-    # Titre
-    ws.merge_cells("A1:H1")
-    t = ws["A1"]
+    
+    
+    # Logo + Titre
+    try:
+        logo = XLImage(LOGO_PATH)
+        logo.width  = 120
+        logo.height = 50
+        ws.add_image(logo, "A1")
+    except Exception:
+        pass  # Si le logo n'est pas trouvé, on continue sans
+
+    ws.merge_cells("C1:H1")
+    t = ws["C1"]
     t.value = "RÉCLAMATION ÉCART DE PRIX"
     _h(t, size=14)
-    ws.row_dimensions[1].height = 32
+    ws.row_dimensions[1].height = 55
 
     # Date
     ws.merge_cells("A2:H2")
@@ -437,12 +452,14 @@ def generer_reclamation_excel(facture: dict, anomalies: list) -> bytes:
         for col, val in enumerate(valeurs, 1):
             cell = ws.cell(row=row, column=col, value=val)
             _c(cell, bg=bg)
+            if col == 3:
+                cell.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
             if col in (4, 5, 6, 7, 8) and isinstance(val, (int, float)):
                 cell.number_format = '#,##0.00 "€"'
                 cell.alignment     = Alignment(horizontal="right", vertical="center")
                 if col in (7, 8):
                     cell.font = Font(bold=True, color=ROUGE_TEXTE, size=10, name="Arial")
-        ws.row_dimensions[row].height = 18
+        ws.row_dimensions[row].height = 35
         row += 1
 
     # Total
@@ -457,7 +474,7 @@ def generer_reclamation_excel(facture: dict, anomalies: list) -> bytes:
     # Politesse
     ws.merge_cells(f"A{row}:H{row}")
     pol           = ws.cell(row=row, column=1,
-                            value="Dans l'attente de votre avoir, nous restons à votre disposition pour tout renseignement complémentaire.\nCordialement,\n\nABBEI — Service Comptabilité")
+                            value="Dans l'attente de votre avoir, nous restons à votre disposition pour tout renseignement complémentaire.\nCordialement,\n\nABBEI")
     pol.font      = Font(size=10, name="Arial")
     pol.alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
     ws.row_dimensions[row].height = 55

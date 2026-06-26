@@ -161,6 +161,8 @@ RÈGLES IMPORTANTES :
 - cause_anomalie : explique pourquoi c'est une anomalie (version teintée, remise non appliquée, référence interne différente, produit hors gamme négociée...)
 - "numero_facture" = numéro de facture (ex: 2603054673, FA409XXX) — PAS le numéro client (code commençant par 000...)
 - "client" = nom du client destinataire (ABBEI, ST ETIENNE DU ROUVRAY...) — PAS le code client numérique
+- Si l'écart de prix concerne une version teintée (mention couleur, CH2, RAL, teinte, BASE SEP, BASE IN...) → type_anomalie = "HORS_BORDEREAU" car c'est un produit différent du standard, pas un écart de prix à réclamer
+- ECART_PRIX uniquement si c'est le même produit standard (blanc, incolore, standard) facturé à un prix supérieur au bordereau sans justification de couleur ou variante
 - Si type_document est avoir ou rfa → anomalies = []"""
                 }
             ]
@@ -255,8 +257,20 @@ def traiter_facture(pdf_bytes: bytes, tarif: dict, nom_fichier: str) -> dict:
             "message":        f"Document ignoré — type : {type_doc.upper()}"
         }
 
-    facture_id = sauvegarder_facture(data, nom_fichier)
+    # ── Filtre sécurité — supprime anomalies incohérentes ────────
+    anomalies_valides = []
+    for a in data.get("anomalies", []):
+        if a.get("type_anomalie") == "ECART_PRIX":
+            pu_f = a.get("prix_unitaire") or 0
+            pu_t = a.get("prix_tarif")    or 0
+            # Écart réel uniquement si > 0.01€
+            if pu_t and pu_f > pu_t + 0.01:
+                anomalies_valides.append(a)
+        else:
+            anomalies_valides.append(a)
+    data["anomalies"] = anomalies_valides
 
+    facture_id = sauvegarder_facture(data, nom_fichier)
     return {
         "facture_id":     facture_id,
         "numero_facture": data.get("numero_facture"),
